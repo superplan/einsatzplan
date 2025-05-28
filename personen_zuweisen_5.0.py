@@ -119,13 +119,15 @@ class Person:
 
 @dataclass
 class Task:
-    """Kleine Struktur für die spätere Nachjustierung"""
+    """Container für eine Aufgabe samt zugeteilter Personen"""
     index: int
     start: dt.datetime
     end: dt.datetime
     category: str
+    required: int
     assigned: List[Person] = field(default_factory=list)
     backup: Optional[Person] = None
+    hint: str = ""
 
 
 def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
@@ -149,6 +151,18 @@ def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
                     break
         if not moved:
             break
+
+def assign_backups(tasks: List[Task], people: Dict[str, Person]):
+    """Weist Backups nur zu, wenn genügend Personen verfügbar sind."""
+    for t in tasks:
+        if len(t.assigned) < t.required:
+            continue  # erst Hauptbesetzung sichern
+        cand = select_candidates(list(people.values()), t.category, t.start, t.end)
+        cand = [p for p in cand if p not in t.assigned]
+        if cand:
+            backup = cand[0]
+            backup.assign(t.start, t.end, t.category)
+            t.backup = backup
 
 # ---------- Kernlogik ----------
 
@@ -211,32 +225,33 @@ def main(xlsx_path: str):
             out_hints[idx] = "Personenanzahl 0 - keine Einteilung"
             continue
 
-        # Kandidaten ermitteln & sortieren
+        # Kandidaten für die Haupteinteilung ermitteln
         cand = select_candidates(list(people.values()), category, start_dt, end_dt)
-        if cand is None:
-            cand = []
         assigned = cand[:required]
-        backup = cand[required] if len(cand) > required else None
 
         hints = []
         if len(assigned) < required:
             hints.append(f"Nur {len(assigned)} von {required} Personen gefunden")
-        if not backup:
-            hints.append("Kein Backup gefunden")
 
         for p in assigned:
             p.assign(start_dt, end_dt, category)
 
-        task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, assigned=assigned, backup=backup))
-        out_hints[idx] = "; ".join(hints)
+        task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, required=required, assigned=assigned, hint="; ".join(hints)))
 
     balance_assignments(task_list, people)
+    assign_backups(task_list, people)
 
     for task in task_list:
         names = [p.name for p in task.assigned]
         if task.backup:
             names.append(f"{task.backup.name} (Backup)")
         out_persons[task.index] = ", ".join(names)
+        hint = task.hint
+        if not task.backup:
+            if hint:
+                hint += "; "
+            hint += "Kein Backup gefunden"
+        out_hints[task.index] = hint
 
     tasks_df["Eingeteilte Personen"] = out_persons
     tasks_df["Hinweis"] = out_hints
