@@ -25,6 +25,7 @@ import pandas as pd
 import datetime as dt
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
+from dataclasses import dataclass, field
 
 # ---------- Konfiguration ----------
 SPECIAL_CATEGORIES: Set[str] = {"Regie", "Springer", "Orga-Springer"}
@@ -113,11 +114,46 @@ class Person:
         self.assignments.append((start, end, category))
         self.total_minutes += int((end - start).total_seconds() // 60)
 
+
+@dataclass
+class Task:
+    """Kleine Struktur für die spätere Nachjustierung"""
+    index: int
+    start: dt.datetime
+    end: dt.datetime
+    category: str
+    assigned: List[Person] = field(default_factory=list)
+    backup: Optional[Person] = None
+
+
+def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
+    """Schiebt Einsätze von stark zu wenig belasteten Personen."""
+    while True:
+        sorted_people = sorted(people.values(), key=lambda p: p.total_minutes)
+        least = sorted_people[0]
+        most = sorted_people[-1]
+        if most.total_minutes - least.total_minutes <= 0:
+            break
+
+        moved = False
+        for t in tasks:
+            if most in t.assigned:
+                if least.is_available(t.start, t.end, t.category) and t.category in least.categories:
+                    t.assigned[t.assigned.index(most)] = least
+                    most.assignments.remove((t.start, t.end, t.category))
+                    most.total_minutes -= int((t.end - t.start).total_seconds() // 60)
+                    least.assign(t.start, t.end, t.category)
+                    moved = True
+                    break
+        if not moved:
+            break
+
 # ---------- Kernlogik ----------
 
 def select_candidates(pool: List[Person], category: str, start: dt.datetime, end: dt.datetime) -> List[Person]:
     elig = [p for p in pool if category in p.categories and p.is_available(start, end, category)]
-    elig.sort(key=lambda p: p.total_minutes)
+    # Bei gleicher Einsatzzeit nach Namen sortieren, damit nicht immer dieselben Personen vorne stehen
+    elig.sort(key=lambda p: (p.total_minutes, p.name))
     return elig
 
 def main(xlsx_path: str):
@@ -135,10 +171,11 @@ def main(xlsx_path: str):
             people[name] = Person(name, cats)
 
     # Ergebnis-Container
-    out_persons: List[str] = []
-    out_hints: List[str] = []
+    out_persons: List[Optional[str]] = [None] * len(tasks_df)
+    out_hints: List[str] = [""] * len(tasks_df)
+    task_list: List[Task] = []
 
-    for _, row in tasks_df.iterrows():
+    for idx, row in tasks_df.iterrows():
         # Spalten über Index (robust gegen Kopfzeilen-Tipfehler)
         date_val = row.iat[0]
         start_val = row.iat[1]
@@ -149,8 +186,8 @@ def main(xlsx_path: str):
         # Kategorie prüfen
         category = "" if pd.isna(category_val) else str(category_val).strip()
         if not category or category.lower() == "nan":
-            out_persons.append("")
-            out_hints.append("Kategorie leer - keine Einteilung")
+            out_persons[idx] = ""
+            out_hints[idx] = "Kategorie leer - keine Einteilung"
             continue
 
         # Zeiten parsen
@@ -159,8 +196,8 @@ def main(xlsx_path: str):
             start_dt = parse_time(date_obj, start_val)
             end_dt = parse_time(date_obj, end_val)
         except Exception as e:
-            out_persons.append("")
-            out_hints.append(f"Zeitfehler: {e}")
+            out_persons[idx] = ""
+            out_hints[idx] = f"Zeitfehler: {e}"
             continue
 
         try:
@@ -168,8 +205,8 @@ def main(xlsx_path: str):
         except ValueError:
             required = 0
         if required <= 0:
-            out_persons.append("")
-            out_hints.append("Personenanzahl 0 - keine Einteilung")
+            out_persons[idx] = ""
+            out_hints[idx] = "Personenanzahl 0 - keine Einteilung"
             continue
 
         # Kandidaten ermitteln & sortieren
@@ -185,16 +222,18 @@ def main(xlsx_path: str):
 
         for p in assigned:
             p.assign(start_dt, end_dt, category)
-#        if backup:
-#            backup.assign(start_dt, end_dt, category)
 
-        names = [p.name for p in assigned]
-        if backup:
-            names.append(f"{backup.name} (Backup)")
-        out_persons.append(", ".join(names))
-        out_hints.append("; ".join(hints))
+        task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, assigned=assigned, backup=backup))
+        out_hints[idx] = "; ".join(hints)
 
-    # Ausgabe schreiben
+    balance_assignments(task_list, people)
+
+    for task in task_list:
+        names = [p.name for p in task.assigned]
+        if task.backup:
+            names.append(f"{task.backup.name} (Backup)")
+        out_persons[task.index] = ", ".join(names)
+
     tasks_df["Eingeteilte Personen"] = out_persons
     tasks_df["Hinweis"] = out_hints
     tasks_df.to_csv("Einsatzplan_Zuteilung.csv", **CSV_KWARGS)
