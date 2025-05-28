@@ -23,7 +23,6 @@ python einsatzplan_scheduler.py 2025-05-26_Einsatzplan.xlsx
 import sys
 import pandas as pd
 import datetime as dt
-from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, field
 

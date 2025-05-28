@@ -23,7 +23,6 @@ python einsatzplan_scheduler.py 2025-05-26_Einsatzplan.xlsx
 import sys
 import pandas as pd
 import datetime as dt
-from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, field
 
@@ -78,8 +77,8 @@ class Person:
 
     @property
     def total_minutes(self) -> int:
-        """Gesamte Einsatzzeit (Haupt- + Backup-Minuten)."""
-        return self.main_minutes + self.backup_minutes
+        """Gesamte Einsatzzeit (nur Haupt-Minuten)."""
+        return self.main_minutes
 
     def _overlap_minutes(self, s1, e1, s2, e2):
         latest_start = max(s1, s2)
@@ -141,7 +140,6 @@ class Task:
     required: int
     assigned: List[Person] = field(default_factory=list)
     backup: Optional[Person] = None
-    hint: str = ""
 
 
 def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
@@ -182,6 +180,19 @@ def assign_backups(tasks: List[Task], people: Dict[str, Person]):
             backup = cand[0]
             backup.assign(t.start, t.end, t.category, role="backup")
             t.backup = backup
+
+def assign_main_round(tasks: List[Task], people: Dict[str, Person]):
+    """Füllt offene Hauptrollen soweit moeglich."""
+    for t in tasks:
+        missing = t.required - len(t.assigned)
+        if missing <= 0:
+            continue
+        cand = select_candidates(list(people.values()), t.category, t.start, t.end, role="main")
+        cand = [p for p in cand if p not in t.assigned]
+        selected = cand[:missing]
+        for p in selected:
+            p.assign(t.start, t.end, t.category, role="main")
+            t.assigned.append(p)
 
 # ---------- Kernlogik ----------
 
@@ -253,19 +264,17 @@ def main(xlsx_path: str):
             out_hints[idx] = "Personenanzahl 0 - keine Einteilung"
             continue
 
-        # Kandidaten für die Haupteinteilung ermitteln
-        cand = select_candidates(list(people.values()), category, start_dt, end_dt, role="main")
-        assigned = cand[:required]
+        task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, required=required, assigned=[]))
 
-        hints = []
-        if len(assigned) < required:
-            hints.append(f"Nur {len(assigned)} von {required} Personen gefunden")
+    # vier Runden: drei ohne Backup, letzte mit Backup
+    assign_main_round(task_list, people)
+    balance_assignments(task_list, people)
 
-        for p in assigned:
-            p.assign(start_dt, end_dt, category, role="main")
+    for _ in range(2):
+        assign_main_round(task_list, people)
+        balance_assignments(task_list, people)
 
-        task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, required=required, assigned=assigned, hint="; ".join(hints)))
-
+    assign_main_round(task_list, people)
     balance_assignments(task_list, people)
     assign_backups(task_list, people)
 
@@ -274,12 +283,15 @@ def main(xlsx_path: str):
         if task.backup:
             names.append(f"{task.backup.name} (Backup)")
         out_persons[task.index] = ", ".join(names)
-        hint = task.hint
+
+        hint_parts = []
+        if len(task.assigned) < task.required:
+            hint_parts.append(
+                f"Nur {len(task.assigned)} von {task.required} Personen gefunden"
+            )
         if not task.backup:
-            if hint:
-                hint += "; "
-            hint += "Kein Backup gefunden"
-        out_hints[task.index] = hint
+            hint_parts.append("Kein Backup gefunden")
+        out_hints[task.index] = "; ".join(hint_parts)
 
     tasks_df["Eingeteilte Personen"] = out_persons
     tasks_df["Hinweis"] = out_hints
