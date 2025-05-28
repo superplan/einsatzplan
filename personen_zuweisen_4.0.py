@@ -43,7 +43,9 @@ def parse_time(date: dt.date, time_value) -> dt.datetime:
     """Erzeugt datetime aus Datum + Excel-Zeit (string, float oder datetime.time)"""
     if pd.isna(time_value):
         raise ValueError("Zeitfeld fehlt")
-    if isinstance(time_value, dt.time):
+    if isinstance(time_value, dt.datetime):
+        t = time_value.time()
+    elif isinstance(time_value, dt.time):
         t = time_value
     elif isinstance(time_value, (float, int)):
         total_seconds = round(24 * 60 * 60 * float(time_value))
