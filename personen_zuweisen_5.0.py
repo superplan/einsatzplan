@@ -76,6 +76,11 @@ class Person:
         self.main_minutes = 0
         self.backup_minutes = 0
 
+    @property
+    def total_minutes(self) -> int:
+        """Gesamte Einsatzzeit (Haupt- + Backup-Minuten)."""
+        return self.main_minutes + self.backup_minutes
+
     def _overlap_minutes(self, s1, e1, s2, e2):
         latest_start = max(s1, s2)
         earliest_end = min(e1, e2)
@@ -142,10 +147,10 @@ class Task:
 def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
     """Schiebt Einsätze von stark zu wenig belasteten Personen."""
     while True:
-        sorted_people = sorted(people.values(), key=lambda p: p.main_minutes)
+        sorted_people = sorted(people.values(), key=lambda p: p.total_minutes)
         least = sorted_people[0]
         most = sorted_people[-1]
-        if most.main_minutes - least.main_minutes <= 0:
+        if most.total_minutes - least.total_minutes <= 0:
             break
 
         moved = False
@@ -190,9 +195,9 @@ def select_candidates(
     """Gibt verfügbare Personen sortiert nach Einsatzzeit zurück."""
     elig = [p for p in pool if category in p.categories and p.is_available(start, end, category)]
     if role == "main":
-        elig.sort(key=lambda p: (p.main_minutes, p.backup_minutes, p.name))
+        elig.sort(key=lambda p: (p.total_minutes, p.main_minutes, p.name))
     else:
-        elig.sort(key=lambda p: (p.backup_minutes, p.main_minutes, p.name))
+        elig.sort(key=lambda p: (p.total_minutes, p.backup_minutes, p.name))
     return elig
 
 def main(xlsx_path: str):
@@ -281,7 +286,7 @@ def main(xlsx_path: str):
     tasks_df.to_csv("Einsatzplan_Zuteilung.csv", **CSV_KWARGS)
 
     stats = pd.DataFrame([
-        {"Person": p.name, "Einsatzzeit_Minuten": p.main_minutes} for p in people.values()
+        {"Person": p.name, "Einsatzzeit_Minuten": p.total_minutes} for p in people.values()
     ]).sort_values("Einsatzzeit_Minuten")
     stats.to_csv("Einsatzzeit_Statistik.csv", **CSV_KWARGS)
 
