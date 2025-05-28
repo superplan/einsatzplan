@@ -71,8 +71,10 @@ class Person:
     def __init__(self, name: str, categories: List[str]):
         self.name = name
         self.categories = categories
-        self.assignments: List[Tuple[dt.datetime, dt.datetime, str]] = []
-        self.total_minutes = 0
+        # start, end, category, role ("main"|"backup")
+        self.assignments: List[Tuple[dt.datetime, dt.datetime, str, str]] = []
+        self.main_minutes = 0
+        self.backup_minutes = 0
 
     def _overlap_minutes(self, s1, e1, s2, e2):
         latest_start = max(s1, s2)
@@ -83,7 +85,10 @@ class Person:
         for win_start, win_end in LUNCH_WINDOWS:
             if win_start.date() != new_start.date():
                 continue
-            busy = sum(self._overlap_minutes(s, e, win_start, win_end) for s, e, _ in self.assignments)
+            busy = sum(
+                self._overlap_minutes(s, e, win_start, win_end)
+                for s, e, _, _ in self.assignments
+            )
             busy += self._overlap_minutes(new_start, new_end, win_start, win_end)
             win_minutes = int((win_end - win_start).total_seconds() // 60)
             if busy > win_minutes - LUNCH_FREE_MIN:
@@ -97,14 +102,14 @@ class Person:
         if self.name.strip().lower().startswith('sandra') and start.date() == dt.date(2025, 6, 5):
             return False
 			
-        for a_start, a_end, a_cat in self.assignments:
+        for a_start, a_end, a_cat, _ in self.assignments:
             if start < a_end and end > a_start:  # Überlapp
                 if category in SPECIAL_CATEGORIES or a_cat in SPECIAL_CATEGORIES:
                     continue  # parallele Sonderkategorie erlaubt
                 return False
         # Pause Jan/Ines
         if self.name.split()[0] in BREAK_PERSONS:
-            for a_start, a_end, _ in self.assignments:
+            for a_start, a_end, _, _ in self.assignments:
                 if 0 <= (start - a_end).total_seconds() / 60 < BREAK_MINUTES:
                     return False
         # Mittagspause
@@ -112,9 +117,13 @@ class Person:
             return False
         return True
 
-    def assign(self, start: dt.datetime, end: dt.datetime, category: str):
-        self.assignments.append((start, end, category))
-        self.total_minutes += int((end - start).total_seconds() // 60)
+    def assign(self, start: dt.datetime, end: dt.datetime, category: str, role: str = "main"):
+        self.assignments.append((start, end, category, role))
+        minutes = int((end - start).total_seconds() // 60)
+        if role == "main":
+            self.main_minutes += minutes
+        else:
+            self.backup_minutes += minutes
 
 
 @dataclass
@@ -133,10 +142,10 @@ class Task:
 def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
     """Schiebt Einsätze von stark zu wenig belasteten Personen."""
     while True:
-        sorted_people = sorted(people.values(), key=lambda p: p.total_minutes)
+        sorted_people = sorted(people.values(), key=lambda p: p.main_minutes)
         least = sorted_people[0]
         most = sorted_people[-1]
-        if most.total_minutes - least.total_minutes <= 0:
+        if most.main_minutes - least.main_minutes <= 0:
             break
 
         moved = False
@@ -144,9 +153,12 @@ def balance_assignments(tasks: List[Task], people: Dict[str, Person]):
             if most in t.assigned:
                 if least.is_available(t.start, t.end, t.category) and t.category in least.categories:
                     t.assigned[t.assigned.index(most)] = least
-                    most.assignments.remove((t.start, t.end, t.category))
-                    most.total_minutes -= int((t.end - t.start).total_seconds() // 60)
-                    least.assign(t.start, t.end, t.category)
+                    for entry in most.assignments:
+                        if entry[0] == t.start and entry[1] == t.end and entry[2] == t.category and entry[3] == "main":
+                            most.assignments.remove(entry)
+                            most.main_minutes -= int((t.end - t.start).total_seconds() // 60)
+                            break
+                    least.assign(t.start, t.end, t.category, role="main")
                     moved = True
                     break
         if not moved:
@@ -157,19 +169,30 @@ def assign_backups(tasks: List[Task], people: Dict[str, Person]):
     for t in tasks:
         if len(t.assigned) < t.required:
             continue  # erst Hauptbesetzung sichern
-        cand = select_candidates(list(people.values()), t.category, t.start, t.end)
+        cand = select_candidates(
+            list(people.values()), t.category, t.start, t.end, role="backup"
+        )
         cand = [p for p in cand if p not in t.assigned]
         if cand:
             backup = cand[0]
-            backup.assign(t.start, t.end, t.category)
+            backup.assign(t.start, t.end, t.category, role="backup")
             t.backup = backup
 
 # ---------- Kernlogik ----------
 
-def select_candidates(pool: List[Person], category: str, start: dt.datetime, end: dt.datetime) -> List[Person]:
+def select_candidates(
+    pool: List[Person],
+    category: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    role: str = "main",
+) -> List[Person]:
+    """Gibt verfügbare Personen sortiert nach Einsatzzeit zurück."""
     elig = [p for p in pool if category in p.categories and p.is_available(start, end, category)]
-    # Bei gleicher Einsatzzeit nach Namen sortieren, damit nicht immer dieselben Personen vorne stehen
-    elig.sort(key=lambda p: (p.total_minutes, p.name))
+    if role == "main":
+        elig.sort(key=lambda p: (p.main_minutes, p.backup_minutes, p.name))
+    else:
+        elig.sort(key=lambda p: (p.backup_minutes, p.main_minutes, p.name))
     return elig
 
 def main(xlsx_path: str):
@@ -226,7 +249,7 @@ def main(xlsx_path: str):
             continue
 
         # Kandidaten für die Haupteinteilung ermitteln
-        cand = select_candidates(list(people.values()), category, start_dt, end_dt)
+        cand = select_candidates(list(people.values()), category, start_dt, end_dt, role="main")
         assigned = cand[:required]
 
         hints = []
@@ -234,7 +257,7 @@ def main(xlsx_path: str):
             hints.append(f"Nur {len(assigned)} von {required} Personen gefunden")
 
         for p in assigned:
-            p.assign(start_dt, end_dt, category)
+            p.assign(start_dt, end_dt, category, role="main")
 
         task_list.append(Task(index=idx, start=start_dt, end=end_dt, category=category, required=required, assigned=assigned, hint="; ".join(hints)))
 
@@ -258,7 +281,7 @@ def main(xlsx_path: str):
     tasks_df.to_csv("Einsatzplan_Zuteilung.csv", **CSV_KWARGS)
 
     stats = pd.DataFrame([
-        {"Person": p.name, "Einsatzzeit_Minuten": p.total_minutes} for p in people.values()
+        {"Person": p.name, "Einsatzzeit_Minuten": p.main_minutes} for p in people.values()
     ]).sort_values("Einsatzzeit_Minuten")
     stats.to_csv("Einsatzzeit_Statistik.csv", **CSV_KWARGS)
 
